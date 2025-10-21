@@ -774,11 +774,13 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
 > {
   constructor(
     component: UsedAPI,
-    private options: {
+    private options: ({
       sortKey: (d: TableAggregateDocument<T>) => T["Key"];
-      sumValue?: (d: TableAggregateDocument<T>) => number;
-      sumValues?: (d: TableAggregateDocument<T>) => Record<string, number>;
-    } & (undefined extends TableAggregateNamespace<T>
+    } & (
+      | { sumValue: (d: TableAggregateDocument<T>) => number; sumValues?: never }
+      | { sumValues: (d: TableAggregateDocument<T>) => Record<string, number>; sumValue?: never }
+      | { sumValue?: never; sumValues?: never }
+    )) & (undefined extends TableAggregateNamespace<T>
       ? {
           namespace?: (
             d: TableAggregateDocument<T>

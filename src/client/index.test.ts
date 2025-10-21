@@ -1305,3 +1305,239 @@ describe("TableAggregate with multi-sum (sumValues)", () => {
     });
   });
 });
+
+describe("Sum Type Enforcement", () => {
+  let t: ConvexTest;
+
+  beforeEach(() => {
+    t = setupTest();
+  });
+
+  describe("DirectAggregate runtime enforcement", () => {
+    test("should reject mixing sumValue and sumValues in DirectAggregate", async () => {
+      const { DirectAggregate } = await import("./index.js");
+
+      const testAggregate = new DirectAggregate<{
+        Key: string;
+        Id: string;
+      }>(components.aggregate);
+
+      await t.run(async (ctx) => {
+        // First insert with sumValue (sets type to "single")
+        await testAggregate.insert(ctx, {
+          key: "a",
+          id: "1",
+          sumValue: 10,
+        });
+
+        // Second insert with sumValues should throw
+        await expect(async () => {
+          await testAggregate.insert(ctx, {
+            key: "b",
+            id: "2",
+            sumValues: { citations: 5 },
+          });
+        }).rejects.toThrow(/Aggregate type mismatch.*sumValue.*sumValues/);
+      });
+    });
+
+    test("should reject mixing sumValues and sumValue in DirectAggregate", async () => {
+      const { DirectAggregate } = await import("./index.js");
+
+      const testAggregate = new DirectAggregate<{
+        Key: string;
+        Id: string;
+      }>(components.aggregate);
+
+      await t.run(async (ctx) => {
+        // First insert with sumValues (sets type to "multi")
+        await testAggregate.insert(ctx, {
+          key: "a",
+          id: "1",
+          sumValues: { citations: 5 },
+        });
+
+        // Second insert with sumValue should throw
+        await expect(async () => {
+          await testAggregate.insert(ctx, {
+            key: "b",
+            id: "2",
+            sumValue: 10,
+          });
+        }).rejects.toThrow(/Aggregate type mismatch.*sumValues.*sumValue/);
+      });
+    });
+
+    test("should allow consistent sumValue usage", async () => {
+      const { DirectAggregate } = await import("./index.js");
+
+      const testAggregate = new DirectAggregate<{
+        Key: string;
+        Id: string;
+      }>(components.aggregate);
+
+      await t.run(async (ctx) => {
+        await testAggregate.insert(ctx, {
+          key: "a",
+          id: "1",
+          sumValue: 10,
+        });
+
+        // This should succeed (both sumValue)
+        await testAggregate.insert(ctx, {
+          key: "b",
+          id: "2",
+          sumValue: 20,
+        });
+
+        const total = await testAggregate.sum(ctx);
+        expect(total).toBe(30);
+      });
+    });
+
+    test("should allow consistent sumValues usage", async () => {
+      const { DirectAggregate } = await import("./index.js");
+
+      const testAggregate = new DirectAggregate<{
+        Key: string;
+        Id: string;
+      }>(components.aggregate);
+
+      await t.run(async (ctx) => {
+        await testAggregate.insert(ctx, {
+          key: "a",
+          id: "1",
+          sumValues: { citations: 5, mentions: 3 },
+        });
+
+        // This should succeed (both sumValues)
+        await testAggregate.insert(ctx, {
+          key: "b",
+          id: "2",
+          sumValues: { citations: 10, mentions: 7 },
+        });
+
+        const total = await testAggregate.sum(ctx);
+        expect(total).toEqual({ citations: 15, mentions: 10 });
+      });
+    });
+
+    test("should enforce type in namespaced aggregates", async () => {
+      const { DirectAggregate } = await import("./index.js");
+
+      const testAggregate = new DirectAggregate<{
+        Key: string;
+        Id: string;
+        Namespace: string;
+      }>(components.aggregate);
+
+      await t.run(async (ctx) => {
+        // Namespace "ns1" uses sumValue
+        await testAggregate.insert(ctx, {
+          key: "a",
+          id: "1",
+          sumValue: 10,
+          namespace: "ns1",
+        });
+
+        // Namespace "ns2" can use sumValues (different namespace, different btree)
+        await testAggregate.insert(ctx, {
+          key: "b",
+          id: "2",
+          sumValues: { citations: 5 },
+          namespace: "ns2",
+        });
+
+        // But mixing in same namespace should fail
+        await expect(async () => {
+          await testAggregate.insert(ctx, {
+            key: "c",
+            id: "3",
+            sumValues: { citations: 7 },
+            namespace: "ns1",
+          });
+        }).rejects.toThrow(/Aggregate type mismatch/);
+      });
+    });
+  });
+
+  describe("TableAggregate compile-time enforcement", () => {
+    test("TableAggregate with sumValue should work", async () => {
+      const { TableAggregate } = await import("./index.js");
+
+      const simpleSchema = defineSchema({
+        items: defineTable({
+          value: v.number(),
+        }),
+      });
+
+      const simpleTest = convexTest(simpleSchema, modules);
+      simpleTest.registerComponent("aggregate", componentSchema, componentModules);
+
+      type SimpleDataModel = DataModelFromSchemaDefinition<typeof simpleSchema>;
+
+      // This should compile fine
+      const aggregate = new TableAggregate<{
+        Key: number;
+        DataModel: SimpleDataModel;
+        TableName: "items";
+      }>(components.aggregate, {
+        sortKey: (doc) => doc.value,
+        sumValue: (doc) => doc.value,
+      });
+
+      await simpleTest.run(async (ctx) => {
+        const docId = await ctx.db.insert("items", { value: 10 });
+        const doc = await ctx.db.get(docId);
+        await aggregate.insert(ctx, doc!);
+
+        const total = await aggregate.sum(ctx);
+        expect(total).toBe(10);
+      });
+    });
+
+    test("TableAggregate with sumValues should work", async () => {
+      const { TableAggregate } = await import("./index.js");
+
+      const metricsSchema = defineSchema({
+        events: defineTable({
+          citations: v.number(),
+          mentions: v.number(),
+        }),
+      });
+
+      const metricsTest = convexTest(metricsSchema, modules);
+      metricsTest.registerComponent("aggregate", componentSchema, componentModules);
+
+      type MetricsDataModel = DataModelFromSchemaDefinition<typeof metricsSchema>;
+
+      // This should compile fine
+      const aggregate = new TableAggregate<{
+        Key: number;
+        DataModel: MetricsDataModel;
+        TableName: "events";
+      }>(components.aggregate, {
+        sortKey: (doc) => doc._creationTime,
+        sumValues: (doc) => ({ citations: doc.citations, mentions: doc.mentions }),
+      });
+
+      await metricsTest.run(async (ctx) => {
+        const docId = await ctx.db.insert("events", { citations: 5, mentions: 3 });
+        const doc = await ctx.db.get(docId);
+        await aggregate.insert(ctx, doc!);
+
+        const total = await aggregate.sum(ctx);
+        expect(total).toEqual({ citations: 5, mentions: 3 });
+      });
+    });
+
+    // TypeScript compile-time tests (these would fail to compile if uncommented):
+    // test("should not compile with both sumValue and sumValues", () => {
+    //   new TableAggregate<{...}>(components.aggregate, {
+    //     sortKey: (doc) => doc.value,
+    //     sumValue: (doc) => doc.value,     // ❌ TypeScript error
+    //     sumValues: (doc) => ({ x: 1 }),   // ❌ Cannot have both
+    //   });
+    // });
+  });
+});

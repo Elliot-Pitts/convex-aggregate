@@ -33,6 +33,29 @@ function log(s: string) {
   }
 }
 
+async function validateAndSetSumType(
+  db: DatabaseWriter,
+  tree: Doc<"btree">,
+  summand: number | Record<string, number>
+) {
+  const incomingType = typeof summand === "number" ? "single" : "multi";
+
+  if (tree.sumType === undefined) {
+    // First insert - set the type
+    await db.patch(tree._id, { sumType: incomingType });
+    return;
+  }
+
+  if (tree.sumType !== incomingType) {
+    const expected = tree.sumType === "single" ? "sumValue (number)" : "sumValues (Record<string, number>)";
+    const received = incomingType === "single" ? "sumValue (number)" : "sumValues (Record<string, number>)";
+    throw new ConvexError(
+      `Aggregate type mismatch: this aggregate uses ${expected} but received ${received}. ` +
+      `Cannot mix single-sum and multi-sum in the same aggregate.`
+    );
+  }
+}
+
 export async function insertHandler(
   ctx: { db: DatabaseWriter },
   args: { key: Key; value: Value; summand?: number | Record<string, number>; namespace?: Namespace }
@@ -44,6 +67,9 @@ export async function insertHandler(
     true
   );
   const summand = args.summand ?? 0;
+
+  // Validate sum type consistency
+  await validateAndSetSumType(ctx.db, tree, summand);
   const pushUp = await insertIntoNode(ctx, args.namespace, tree.root, {
     k: args.key,
     v: args.value,

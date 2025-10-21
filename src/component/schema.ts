@@ -35,6 +35,7 @@ export default defineSchema({
     root: v.id("btreeNode"),
     namespace: v.optional(v.any()),
     maxNodeSize: v.number(),
+    sumType: v.optional(v.union(v.literal("single"), v.literal("multi"))),
   }).index("by_namespace", ["namespace"]),
   btreeNode: defineTable({
     items: v.array(item),
