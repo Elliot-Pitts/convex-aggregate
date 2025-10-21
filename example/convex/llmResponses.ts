@@ -1,9 +1,10 @@
 /**
- * Example: Tracking LLM Response Metrics with Multi-Sum Aggregates
+ * Example: Tracking LLM Response Metrics with DirectAggregate Multi-Sum
  *
- * This example demonstrates how to use multi-sum aggregates to track multiple
- * metrics (citations and mentions) from LLM responses in a single B-tree.
- * This is more efficient than creating separate aggregates for each metric.
+ * This example demonstrates how to use DirectAggregate with multi-sum aggregates
+ * to track multiple metrics (citations and mentions) from LLM responses in a
+ * single B-tree. This is more efficient than creating separate aggregates for
+ * each metric.
  */
 
 import { v } from "convex/values";

@@ -878,3 +878,430 @@ describe("TableAggregate with namespace", () => {
     });
   });
 });
+
+describe("DirectAggregate with multi-sum (sumValues)", () => {
+  let t: ConvexTest;
+
+  beforeEach(() => {
+    t = setupTest();
+  });
+
+  test("should track multiple sum fields with DirectAggregate", async () => {
+    const { DirectAggregate } = await import("./index.js");
+
+    const llmMetrics = new DirectAggregate<{
+      Key: [userId: string, timestamp: number];
+      Id: string;
+    }>(components.aggregate);
+
+    await t.run(async (ctx) => {
+      // Insert items with multi-sum values
+      await llmMetrics.insert(ctx, {
+        key: ["user1", 100],
+        id: "response1",
+        sumValues: {
+          citations: 5,
+          mentions: 3,
+        },
+      });
+
+      await llmMetrics.insert(ctx, {
+        key: ["user1", 200],
+        id: "response2",
+        sumValues: {
+          citations: 10,
+          mentions: 7,
+        },
+      });
+
+      await llmMetrics.insert(ctx, {
+        key: ["user2", 150],
+        id: "response3",
+        sumValues: {
+          citations: 2,
+          mentions: 1,
+        },
+      });
+
+      // Query all items for user1
+      const user1Metrics = await llmMetrics.sum(ctx, {
+        bounds: {
+          lower: { key: ["user1", 0] },
+          upper: { key: ["user1", Infinity] },
+        },
+      });
+
+      expect(user1Metrics).toEqual({ citations: 15, mentions: 10 });
+
+      // Query all items for user2
+      const user2Metrics = await llmMetrics.sum(ctx, {
+        bounds: {
+          lower: { key: ["user2", 0] },
+          upper: { key: ["user2", Infinity] },
+        },
+      });
+
+      expect(user2Metrics).toEqual({ citations: 2, mentions: 1 });
+
+      // Query total count for user1
+      const user1Count = await llmMetrics.count(ctx, {
+        bounds: {
+          lower: { key: ["user1", 0] },
+          upper: { key: ["user1", Infinity] },
+        },
+      });
+
+      expect(user1Count).toBe(2);
+    });
+  });
+
+  test("should work with sumBatch for multi-sum aggregates", async () => {
+    const { DirectAggregate } = await import("./index.js");
+
+    const llmMetrics = new DirectAggregate<{
+      Key: [userId: string, timestamp: number];
+      Id: string;
+    }>(components.aggregate);
+
+    await t.run(async (ctx) => {
+      // Insert items with multi-sum values
+      await llmMetrics.insert(ctx, {
+        key: ["user1", 100],
+        id: "response1",
+        sumValues: {
+          citations: 5,
+          mentions: 3,
+        },
+      });
+
+      await llmMetrics.insert(ctx, {
+        key: ["user2", 200],
+        id: "response2",
+        sumValues: {
+          citations: 10,
+          mentions: 7,
+        },
+      });
+
+      // Batch query for both users
+      const allMetrics = await llmMetrics.sumBatch(ctx, [
+        {
+          bounds: {
+            lower: { key: ["user1", 0] as [string, number] },
+            upper: { key: ["user1", Infinity] as [string, number] },
+          },
+        },
+        {
+          bounds: {
+            lower: { key: ["user2", 0] as [string, number] },
+            upper: { key: ["user2", Infinity] as [string, number] },
+          },
+        },
+      ]);
+
+      expect(allMetrics).toHaveLength(2);
+      expect(allMetrics[0]).toEqual({ citations: 5, mentions: 3 });
+      expect(allMetrics[1]).toEqual({ citations: 10, mentions: 7 });
+    });
+  });
+
+  test("should maintain backwards compatibility with single sumValue", async () => {
+    const { DirectAggregate } = await import("./index.js");
+
+    const scoreAggregate = new DirectAggregate<{
+      Key: string;
+      Id: string;
+    }>(components.aggregate);
+
+    await t.run(async (ctx) => {
+      // Insert items with single sumValue (old way)
+      await scoreAggregate.insert(ctx, {
+        key: "item1",
+        id: "id1",
+        sumValue: 10,
+      });
+
+      await scoreAggregate.insert(ctx, {
+        key: "item2",
+        id: "id2",
+        sumValue: 20,
+      });
+
+      // Query should return a plain number
+      const total = await scoreAggregate.sum(ctx);
+
+      expect(total).toBe(30);
+      expect(typeof total).toBe("number");
+    });
+  });
+
+  test("should throw error when both sumValue and sumValues are provided", async () => {
+    const { DirectAggregate } = await import("./index.js");
+
+    const testAggregate = new DirectAggregate<{
+      Key: string;
+      Id: string;
+    }>(components.aggregate);
+
+    await t.run(async (ctx) => {
+      await expect(async () => {
+        await testAggregate.insert(ctx, {
+          key: "item1",
+          id: "id1",
+          sumValue: 10,
+          sumValues: { citations: 5 },
+        } as any);
+      }).rejects.toThrow("Cannot provide both sumValue and sumValues");
+    });
+  });
+});
+
+describe("TableAggregate with multi-sum (sumValues)", () => {
+  let t: ConvexTest;
+
+  const metricsSchema = defineSchema({
+    llmResponses: defineTable({
+      userId: v.string(),
+      timestamp: v.number(),
+      citations: v.number(),
+      mentions: v.number(),
+    }),
+  });
+
+  beforeEach(() => {
+    t = convexTest(metricsSchema, modules);
+    t.registerComponent("aggregate", componentSchema, componentModules);
+  });
+
+  test("should track multiple sum fields with TableAggregate", async () => {
+    const { TableAggregate } = await import("./index.js");
+
+    type MetricsDataModel = DataModelFromSchemaDefinition<typeof metricsSchema>;
+
+    const llmMetrics = new TableAggregate<{
+      Key: [userId: string, timestamp: number];
+      DataModel: MetricsDataModel;
+      TableName: "llmResponses";
+    }>(components.aggregate, {
+      sortKey: (doc) => [doc.userId, doc.timestamp],
+      sumValues: (doc) => ({
+        citations: doc.citations,
+        mentions: doc.mentions,
+      }),
+    });
+
+    await t.run(async (ctx) => {
+      // Insert documents
+      const doc1 = await ctx.db.insert("llmResponses", {
+        userId: "user1",
+        timestamp: 100,
+        citations: 5,
+        mentions: 3,
+      });
+
+      const doc2 = await ctx.db.insert("llmResponses", {
+        userId: "user1",
+        timestamp: 200,
+        citations: 10,
+        mentions: 7,
+      });
+
+      const doc3 = await ctx.db.insert("llmResponses", {
+        userId: "user2",
+        timestamp: 150,
+        citations: 2,
+        mentions: 1,
+      });
+
+      // Insert into aggregate
+      await llmMetrics.insert(ctx, (await ctx.db.get(doc1))!);
+      await llmMetrics.insert(ctx, (await ctx.db.get(doc2))!);
+      await llmMetrics.insert(ctx, (await ctx.db.get(doc3))!);
+
+      // Query metrics for user1
+      const user1Metrics = await llmMetrics.sum(ctx, {
+        bounds: {
+          lower: { key: ["user1", 0] },
+          upper: { key: ["user1", Infinity] },
+        },
+      });
+
+      expect(user1Metrics).toEqual({ citations: 15, mentions: 10 });
+
+      // Query metrics for user2
+      const user2Metrics = await llmMetrics.sum(ctx, {
+        bounds: {
+          lower: { key: ["user2", 0] },
+          upper: { key: ["user2", Infinity] },
+        },
+      });
+
+      expect(user2Metrics).toEqual({ citations: 2, mentions: 1 });
+    });
+  });
+
+  test("should work with sumBatch for TableAggregate multi-sum", async () => {
+    const { TableAggregate } = await import("./index.js");
+
+    type MetricsDataModel = DataModelFromSchemaDefinition<typeof metricsSchema>;
+
+    const llmMetrics = new TableAggregate<{
+      Key: [userId: string, timestamp: number];
+      DataModel: MetricsDataModel;
+      TableName: "llmResponses";
+    }>(components.aggregate, {
+      sortKey: (doc) => [doc.userId, doc.timestamp],
+      sumValues: (doc) => ({
+        citations: doc.citations,
+        mentions: doc.mentions,
+      }),
+    });
+
+    await t.run(async (ctx) => {
+      // Insert documents
+      const doc1 = await ctx.db.insert("llmResponses", {
+        userId: "user1",
+        timestamp: 100,
+        citations: 5,
+        mentions: 3,
+      });
+
+      const doc2 = await ctx.db.insert("llmResponses", {
+        userId: "user2",
+        timestamp: 200,
+        citations: 10,
+        mentions: 7,
+      });
+
+      // Insert into aggregate
+      await llmMetrics.insert(ctx, (await ctx.db.get(doc1))!);
+      await llmMetrics.insert(ctx, (await ctx.db.get(doc2))!);
+
+      // Batch query for both users
+      const allMetrics = await llmMetrics.sumBatch(ctx, [
+        {
+          bounds: {
+            lower: { key: ["user1", 0] as [string, number] },
+            upper: { key: ["user1", Infinity] as [string, number] },
+          },
+        },
+        {
+          bounds: {
+            lower: { key: ["user2", 0] as [string, number] },
+            upper: { key: ["user2", Infinity] as [string, number] },
+          },
+        },
+      ]);
+
+      expect(allMetrics).toHaveLength(2);
+      expect(allMetrics[0]).toEqual({ citations: 5, mentions: 3 });
+      expect(allMetrics[1]).toEqual({ citations: 10, mentions: 7 });
+    });
+  });
+
+  test("should handle replace operation with multi-sum", async () => {
+    const { TableAggregate } = await import("./index.js");
+
+    type MetricsDataModel = DataModelFromSchemaDefinition<typeof metricsSchema>;
+
+    const llmMetrics = new TableAggregate<{
+      Key: [userId: string, timestamp: number];
+      DataModel: MetricsDataModel;
+      TableName: "llmResponses";
+    }>(components.aggregate, {
+      sortKey: (doc) => [doc.userId, doc.timestamp],
+      sumValues: (doc) => ({
+        citations: doc.citations,
+        mentions: doc.mentions,
+      }),
+    });
+
+    await t.run(async (ctx) => {
+      // Insert a document
+      const docId = await ctx.db.insert("llmResponses", {
+        userId: "user1",
+        timestamp: 100,
+        citations: 5,
+        mentions: 3,
+      });
+
+      const doc = (await ctx.db.get(docId))!;
+      await llmMetrics.insert(ctx, doc);
+
+      // Verify initial metrics
+      let metrics = await llmMetrics.sum(ctx, {
+        bounds: {
+          lower: { key: ["user1", 0] },
+          upper: { key: ["user1", Infinity] },
+        },
+      });
+      expect(metrics).toEqual({ citations: 5, mentions: 3 });
+
+      // Update the document
+      await ctx.db.patch(docId, {
+        citations: 15,
+        mentions: 10,
+      });
+
+      const updatedDoc = (await ctx.db.get(docId))!;
+      await llmMetrics.replace(ctx, doc, updatedDoc);
+
+      // Verify updated metrics
+      metrics = await llmMetrics.sum(ctx, {
+        bounds: {
+          lower: { key: ["user1", 0] },
+          upper: { key: ["user1", Infinity] },
+        },
+      });
+      expect(metrics).toEqual({ citations: 15, mentions: 10 });
+    });
+  });
+
+  test("should maintain backwards compatibility with single sumValue in TableAggregate", async () => {
+    const { TableAggregate } = await import("./index.js");
+
+    const simpleSchema = defineSchema({
+      scores: defineTable({
+        name: v.string(),
+        value: v.number(),
+      }),
+    });
+
+    const simpleTest = convexTest(simpleSchema, modules);
+    simpleTest.registerComponent("aggregate", componentSchema, componentModules);
+
+    type SimpleDataModel = DataModelFromSchemaDefinition<typeof simpleSchema>;
+
+    const scoreAggregate = new TableAggregate<{
+      Key: number;
+      DataModel: SimpleDataModel;
+      TableName: "scores";
+    }>(components.aggregate, {
+      sortKey: (doc) => doc.value,
+      sumValue: (doc) => doc.value,
+    });
+
+    await simpleTest.run(async (ctx) => {
+      // Insert documents
+      const doc1 = await ctx.db.insert("scores", {
+        name: "item1",
+        value: 10,
+      });
+
+      const doc2 = await ctx.db.insert("scores", {
+        name: "item2",
+        value: 20,
+      });
+
+      // Insert into aggregate
+      await scoreAggregate.insert(ctx, (await ctx.db.get(doc1))!);
+      await scoreAggregate.insert(ctx, (await ctx.db.get(doc2))!);
+
+      // Query should return a plain number
+      const total = await scoreAggregate.sum(ctx);
+
+      expect(total).toBe(30);
+      expect(typeof total).toBe("number");
+    });
+  });
+});
