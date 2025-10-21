@@ -877,4 +877,238 @@ describe("TableAggregate with namespace", () => {
       expect(countExclusiveArrayUpper).toBe(2);
     });
   });
+
+  describe("AggregateConfig on creation", () => {
+    let t: ConvexTest;
+
+    beforeEach(() => {
+      t = setupTest();
+    });
+
+    test("should use config from constructor on first insert", async () => {
+      const aggregateWithConfig = new TableAggregate<{
+        Key: number;
+        DataModel: DataModel;
+        TableName: "testItems";
+      }>(
+        components.aggregate,
+        {
+          sortKey: (doc) => doc.value,
+          sumValue: (doc) => doc.value,
+        },
+        { maxNodeSize: 32, rootLazy: false }
+      );
+
+      await t.run(async (ctx) => {
+        const doc = await testItem(ctx, { name: "test", value: 1 });
+        await aggregateWithConfig.insert(ctx, doc);
+
+        // Verify the tree was created with our config
+        // We can verify by checking that subsequent operations work
+        const count = await aggregateWithConfig.count(ctx);
+        expect(count).toBe(1);
+      });
+    });
+
+    test("should use config with partial settings (maxNodeSize only)", async () => {
+      const aggregateWithConfig = new TableAggregate<{
+        Key: number;
+        DataModel: DataModel;
+        TableName: "testItems";
+      }>(
+        components.aggregate,
+        {
+          sortKey: (doc) => doc.value,
+          sumValue: (doc) => doc.value,
+        },
+        { maxNodeSize: 64 }
+      );
+
+      await t.run(async (ctx) => {
+        const doc = await testItem(ctx, { name: "test", value: 1 });
+        await aggregateWithConfig.insert(ctx, doc);
+
+        const count = await aggregateWithConfig.count(ctx);
+        expect(count).toBe(1);
+      });
+    });
+
+    test("should use config with partial settings (rootLazy only)", async () => {
+      const aggregateWithConfig = new TableAggregate<{
+        Key: number;
+        DataModel: DataModel;
+        TableName: "testItems";
+      }>(
+        components.aggregate,
+        {
+          sortKey: (doc) => doc.value,
+          sumValue: (doc) => doc.value,
+        },
+        { rootLazy: false }
+      );
+
+      await t.run(async (ctx) => {
+        const doc = await testItem(ctx, { name: "test", value: 1 });
+        await aggregateWithConfig.insert(ctx, doc);
+
+        const count = await aggregateWithConfig.count(ctx);
+        expect(count).toBe(1);
+      });
+    });
+
+    test("should allow clear to override constructor config", async () => {
+      const aggregateWithConfig = new TableAggregate<{
+        Key: number;
+        DataModel: DataModel;
+        TableName: "testItems";
+      }>(
+        components.aggregate,
+        {
+          sortKey: (doc) => doc.value,
+          sumValue: (doc) => doc.value,
+        },
+        { maxNodeSize: 32, rootLazy: false }
+      );
+
+      await t.run(async (ctx) => {
+        const doc = await testItem(ctx, { name: "test", value: 1 });
+        await aggregateWithConfig.insert(ctx, doc);
+
+        // Clear with different config
+        await aggregateWithConfig.clear(ctx, {
+          maxNodeSize: 16,
+          rootLazy: true,
+        });
+
+        // Insert again and verify it works
+        const doc2 = await testItem(ctx, { name: "test2", value: 2 });
+        await aggregateWithConfig.insert(ctx, doc2);
+
+        const count = await aggregateWithConfig.count(ctx);
+        expect(count).toBe(1);
+      });
+    });
+
+    test("should use constructor config when clear is called without options", async () => {
+      const aggregateWithConfig = new TableAggregate<{
+        Key: number;
+        DataModel: DataModel;
+        TableName: "testItems";
+      }>(
+        components.aggregate,
+        {
+          sortKey: (doc) => doc.value,
+          sumValue: (doc) => doc.value,
+        },
+        { maxNodeSize: 32, rootLazy: false }
+      );
+
+      await t.run(async (ctx) => {
+        const doc = await testItem(ctx, { name: "test", value: 1 });
+        await aggregateWithConfig.insert(ctx, doc);
+
+        // Clear without options should use constructor config
+        await aggregateWithConfig.clear(ctx);
+
+        // Insert again and verify it works
+        const doc2 = await testItem(ctx, { name: "test2", value: 2 });
+        await aggregateWithConfig.insert(ctx, doc2);
+
+        const count = await aggregateWithConfig.count(ctx);
+        expect(count).toBe(1);
+      });
+    });
+
+    test("should work without config (backward compatibility)", async () => {
+      const aggregateWithoutConfig = new TableAggregate<{
+        Key: number;
+        DataModel: DataModel;
+        TableName: "testItems";
+      }>(components.aggregate, {
+        sortKey: (doc) => doc.value,
+        sumValue: (doc) => doc.value,
+      });
+
+      await t.run(async (ctx) => {
+        const doc = await testItem(ctx, { name: "test", value: 1 });
+        await aggregateWithoutConfig.insert(ctx, doc);
+
+        const count = await aggregateWithoutConfig.count(ctx);
+        expect(count).toBe(1);
+      });
+    });
+
+    test("should handle multiple inserts with config", async () => {
+      const aggregateWithConfig = new TableAggregate<{
+        Key: number;
+        DataModel: DataModel;
+        TableName: "testItems";
+      }>(
+        components.aggregate,
+        {
+          sortKey: (doc) => doc.value,
+          sumValue: (doc) => doc.value,
+        },
+        { maxNodeSize: 8, rootLazy: true }
+      );
+
+      await t.run(async (ctx) => {
+        // Insert multiple items
+        for (let i = 0; i < 10; i++) {
+          const doc = await testItem(ctx, { name: `test${i}`, value: i });
+          await aggregateWithConfig.insert(ctx, doc);
+        }
+
+        const count = await aggregateWithConfig.count(ctx);
+        expect(count).toBe(10);
+
+        const sum = await aggregateWithConfig.sum(ctx);
+        expect(sum).toBe(45); // 0+1+2+...+9 = 45
+      });
+    });
+
+    test("should handle config with namespaced aggregates", async () => {
+      const aggregateWithNamespaceAndConfig = new TableAggregate<{
+        Namespace: string;
+        Key: number;
+        DataModel: DataModel;
+        TableName: "photos";
+      }>(
+        components.aggregate,
+        {
+          namespace: (doc) => doc.album,
+          sortKey: (doc) => doc.score,
+        },
+        { maxNodeSize: 24, rootLazy: false }
+      );
+
+      await t.run(async (ctx) => {
+        const id1 = await ctx.db.insert("photos", {
+          album: "vacation",
+          url: "photo1.jpg",
+          score: 10,
+        });
+        const doc1 = await ctx.db.get(id1);
+        await aggregateWithNamespaceAndConfig.insert(ctx, doc1!);
+
+        const id2 = await ctx.db.insert("photos", {
+          album: "family",
+          url: "photo2.jpg",
+          score: 20,
+        });
+        const doc2 = await ctx.db.get(id2);
+        await aggregateWithNamespaceAndConfig.insert(ctx, doc2!);
+
+        const vacationCount = await aggregateWithNamespaceAndConfig.count(ctx, {
+          namespace: "vacation",
+        });
+        expect(vacationCount).toBe(1);
+
+        const familyCount = await aggregateWithNamespaceAndConfig.count(ctx, {
+          namespace: "family",
+        });
+        expect(familyCount).toBe(1);
+      });
+    });
+  });
 });

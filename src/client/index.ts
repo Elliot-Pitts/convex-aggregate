@@ -40,6 +40,26 @@ export type Item<K extends Key, ID extends string> = {
 export type { Key, Bound };
 
 /**
+ * Configuration options for the Aggregate data structure.
+ */
+export type AggregateConfig = {
+  /**
+   * The maximum number of items in a B-tree node before it splits.
+   * Larger values reduce write contention but may increase read latency.
+   * Default is 16.
+   */
+  maxNodeSize?: number;
+  /**
+   * Whether the root node should lazily compute aggregates.
+   * Set to false to eagerly compute aggregates on the root node, which
+   * improves aggregation latency at the expense of making all writes contend
+   * with each other. Only recommended for read-heavy workloads.
+   * Default is true.
+   */
+  rootLazy?: boolean;
+};
+
+/**
  * Write data to be aggregated, and read aggregated data.
  *
  * The data structure is effectively a key-value store sorted by key, where the
@@ -57,7 +77,41 @@ export class Aggregate<
   ID extends string,
   Namespace extends ConvexValue | undefined = undefined,
 > {
-  constructor(protected component: UsedAPI) {}
+  protected _config?: AggregateConfig;
+  private _initializedNamespaces = new Set<string>();
+
+  constructor(protected component: UsedAPI, config?: AggregateConfig) {
+    this._config = config;
+  }
+
+  /**
+   * Ensures the tree is initialized with the configured settings for the given namespace.
+   * This is called automatically before the first write operation.
+   */
+  private async _ensureInitialized(
+    ctx: RunMutationCtx,
+    namespace: Namespace
+  ): Promise<void> {
+    if (!this._config) {
+      // No config set, let the backend use defaults
+      return;
+    }
+
+    const namespaceKey = JSON.stringify(namespace);
+    if (this._initializedNamespaces.has(namespaceKey)) {
+      // Already initialized for this namespace
+      return;
+    }
+
+    // Initialize the tree with our config
+    await ctx.runMutation(this.component.public.init, {
+      namespace,
+      maxNodeSize: this._config.maxNodeSize,
+      rootLazy: this._config.rootLazy,
+    });
+
+    this._initializedNamespaces.add(namespaceKey);
+  }
 
   /// Aggregate queries.
 
@@ -376,6 +430,7 @@ export class Aggregate<
     id: ID,
     summand?: number
   ): Promise<void> {
+    await this._ensureInitialized(ctx, namespace);
     await ctx.runMutation(this.component.public.insert, {
       key: keyToPosition(key, id),
       summand,
@@ -389,6 +444,7 @@ export class Aggregate<
     key: K,
     id: ID
   ): Promise<void> {
+    await this._ensureInitialized(ctx, namespace);
     await ctx.runMutation(this.component.public.delete_, {
       key: keyToPosition(key, id),
       namespace,
@@ -403,6 +459,10 @@ export class Aggregate<
     id: ID,
     summand?: number
   ): Promise<void> {
+    await this._ensureInitialized(ctx, currentNamespace);
+    if (currentNamespace !== newNamespace) {
+      await this._ensureInitialized(ctx, newNamespace);
+    }
     await ctx.runMutation(this.component.public.replace, {
       currentKey: keyToPosition(currentKey, id),
       newKey: keyToPosition(newKey, id),
@@ -435,6 +495,7 @@ export class Aggregate<
     key: K,
     id: ID
   ): Promise<void> {
+    await this._ensureInitialized(ctx, namespace);
     await ctx.runMutation(this.component.public.deleteIfExists, {
       key: keyToPosition(key, id),
       namespace,
@@ -449,6 +510,10 @@ export class Aggregate<
     id: ID,
     summand?: number
   ): Promise<void> {
+    await this._ensureInitialized(ctx, currentNamespace);
+    if (currentNamespace !== newNamespace) {
+      await this._ensureInitialized(ctx, newNamespace);
+    }
     await ctx.runMutation(this.component.public.replaceOrInsert, {
       currentKey: keyToPosition(currentKey, id),
       newKey: keyToPosition(newKey, id),
@@ -480,11 +545,20 @@ export class Aggregate<
       Namespace
     >
   ): Promise<void> {
+    const namespace = namespaceFromOpts(opts);
+    // Merge configs: explicit opts > constructor config > existing tree settings
+    const maxNodeSize = opts[0]?.maxNodeSize ?? this._config?.maxNodeSize;
+    const rootLazy = opts[0]?.rootLazy ?? this._config?.rootLazy;
+
     await ctx.runMutation(this.component.public.clear, {
-      maxNodeSize: opts[0]?.maxNodeSize,
-      rootLazy: opts[0]?.rootLazy,
-      namespace: namespaceFromOpts(opts),
+      maxNodeSize,
+      rootLazy,
+      namespace,
     });
+
+    // Mark as initialized since clear just created/recreated the tree
+    const namespaceKey = JSON.stringify(namespace);
+    this._initializedNamespaces.add(namespaceKey);
   }
   /**
    * If rootLazy is false (the default is true but it can be set to false by
@@ -757,9 +831,10 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
           namespace: (
             d: TableAggregateDocument<T>
           ) => TableAggregateNamespace<T>;
-        })
+        }),
+    config?: AggregateConfig
   ) {
-    super(component);
+    super(component, config);
   }
 
   async insert(
