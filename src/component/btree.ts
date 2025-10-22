@@ -33,9 +33,32 @@ function log(s: string) {
   }
 }
 
+async function validateAndSetSumType(
+  db: DatabaseWriter,
+  tree: Doc<"btree">,
+  summand: number | Record<string, number>
+) {
+  const incomingType = typeof summand === "number" ? "single" : "multi";
+
+  if (tree.sumType === undefined) {
+    // First insert - set the type
+    await db.patch(tree._id, { sumType: incomingType });
+    return;
+  }
+
+  if (tree.sumType !== incomingType) {
+    const expected = tree.sumType === "single" ? "sumValue (number)" : "sumValues (Record<string, number>)";
+    const received = incomingType === "single" ? "sumValue (number)" : "sumValues (Record<string, number>)";
+    throw new ConvexError(
+      `Aggregate type mismatch: this aggregate uses ${expected} but received ${received}. ` +
+      `Cannot mix single-sum and multi-sum in the same aggregate.`
+    );
+  }
+}
+
 export async function insertHandler(
   ctx: { db: DatabaseWriter },
-  args: { key: Key; value: Value; summand?: number; namespace?: Namespace }
+  args: { key: Key; value: Value; summand?: number | Record<string, number>; namespace?: Namespace }
 ) {
   const tree = await getOrCreateTree(
     ctx.db,
@@ -44,6 +67,9 @@ export async function insertHandler(
     true
   );
   const summand = args.summand ?? 0;
+
+  // Validate sum type consistency
+  await validateAndSetSumType(ctx.db, tree, summand);
   const pushUp = await insertIntoNode(ctx, args.namespace, tree.root, {
     k: args.key,
     v: args.value,
@@ -205,9 +231,31 @@ async function validateNode(
   }
 
   // Node sum matches sum of subtree sums plus key sum.
-  if (Math.abs(acc.sum - nAggregate.sum) > 0.0001) {
+  if (typeof acc.sum === "number" && typeof nAggregate.sum === "number") {
+    if (Math.abs(acc.sum - nAggregate.sum) > 0.0001) {
+      throw new ConvexError(
+        `node ${node} sum does not match subtrees ${acc.sum} !== ${nAggregate.sum}`
+      );
+    }
+  } else if (typeof acc.sum === "object" && typeof nAggregate.sum === "object") {
+    // For multi-sum, check each field
+    const accKeys = Object.keys(acc.sum);
+    const nKeys = Object.keys(nAggregate.sum);
+    if (accKeys.length !== nKeys.length || !accKeys.every(k => nKeys.includes(k))) {
+      throw new ConvexError(
+        `node ${node} sum keys do not match subtrees ${JSON.stringify(acc.sum)} !== ${JSON.stringify(nAggregate.sum)}`
+      );
+    }
+    for (const key of accKeys) {
+      if (Math.abs(acc.sum[key] - nAggregate.sum[key]) > 0.0001) {
+        throw new ConvexError(
+          `node ${node} sum[${key}] does not match subtrees ${acc.sum[key]} !== ${nAggregate.sum[key]}`
+        );
+      }
+    }
+  } else {
     throw new ConvexError(
-      `node ${node} sum does not match subtrees ${acc.sum} !== ${nAggregate.sum}`
+      `node ${node} sum types do not match: ${typeof acc.sum} !== ${typeof nAggregate.sum}`
     );
   }
 
@@ -320,7 +368,7 @@ async function aggregateBetweenInNode(
       }
     })
   );
-  let count = { count: 0, sum: 0 };
+  let count: Aggregate = { count: 0, sum: 0 };
   for (const c of counts) {
     count = add(count, c);
   }
@@ -760,17 +808,73 @@ async function nodeAggregate(
   return add(accumulate(nodeCounts(node)), accumulate(subCounts));
 }
 
+function addSums(
+  a: number | Record<string, number>,
+  b: number | Record<string, number>
+): number | Record<string, number> {
+  // Both are numbers - simple addition
+  if (typeof a === "number" && typeof b === "number") {
+    return a + b;
+  }
+
+  // Identity optimization: 0 + x = x (prevents polluting Records with {default: 0})
+  if (a === 0) return b;
+  if (b === 0) return a;
+
+  // At least one is a Record - normalize both to Records and combine
+  const aNorm = typeof a === "number" ? { default: a } : a;
+  const bNorm = typeof b === "number" ? { default: b } : b;
+
+  const result: Record<string, number> = { ...aNorm };
+  for (const key in bNorm) {
+    result[key] = (result[key] ?? 0) + bNorm[key];
+  }
+  return result;
+}
+
+function subSums(
+  a: number | Record<string, number>,
+  b: number | Record<string, number>
+): number | Record<string, number> {
+  // Both are numbers - simple subtraction
+  if (typeof a === "number" && typeof b === "number") {
+    return a - b;
+  }
+
+  // Identity optimization
+  if (b === 0) return a;
+  if (a === 0) {
+    // 0 - b: negate all values in b
+    if (typeof b === "number") return -b;
+    const result: Record<string, number> = {};
+    for (const key in b) {
+      result[key] = -b[key];
+    }
+    return result;
+  }
+
+  // At least one is a Record
+  const aNorm = typeof a === "number" ? { default: a } : a;
+  const bNorm = typeof b === "number" ? { default: b } : b;
+
+  const result: Record<string, number> = { ...aNorm };
+  for (const key in bNorm) {
+    result[key] = (result[key] ?? 0) - bNorm[key];
+  }
+  return result;
+}
+
 function add(a: Aggregate, b: Aggregate) {
   return {
     count: a.count + b.count,
-    sum: a.sum + b.sum,
+    sum: addSums(a.sum, b.sum),
   };
 }
 
 function sub(a: Aggregate, b: Aggregate) {
   return {
     count: a.count - b.count,
-    sum: a.sum - b.sum,
+    sum: subSums(a.sum, b.sum),
   };
 }
 
@@ -862,18 +966,25 @@ async function insertIntoNode(
     }
     // Sanity check that we split the sum across our new children correctly.
     // To avoid floating point imprecision, allow for some slight difference.
-    if (
-      newN.aggregate &&
-      Math.abs(
-        leftCount.sum +
-          rightCount.sum +
-          newN.items[minNodeSize].s -
-          newN.aggregate.sum
-      ) > 0.00001
-    ) {
-      throw new Error(
-        `bad sum split ${leftCount.sum} ${rightCount.sum} ${newN.items[minNodeSize].s} ${newN.aggregate.sum}`
-      );
+    if (newN.aggregate) {
+      // Validate sum split for both number and Record types
+      const totalSum = addSums(addSums(leftCount.sum, rightCount.sum), newN.items[minNodeSize].s);
+
+      if (typeof totalSum === "number" && typeof newN.aggregate.sum === "number") {
+        if (Math.abs(totalSum - newN.aggregate.sum) > 0.00001) {
+          throw new Error(
+            `bad sum split ${leftCount.sum} ${rightCount.sum} ${newN.items[minNodeSize].s} ${newN.aggregate.sum}`
+          );
+        }
+      } else if (typeof totalSum === "object" && typeof newN.aggregate.sum === "object") {
+        for (const key of Object.keys(totalSum)) {
+          if (Math.abs(totalSum[key] - (newN.aggregate.sum[key] ?? 0)) > 0.00001) {
+            throw new Error(
+              `bad sum split for ${key}: ${totalSum[key]} !== ${newN.aggregate.sum[key]}`
+            );
+          }
+        }
+      }
     }
     await ctx.db.patch(node, {
       items: newN.items.slice(0, minNodeSize),

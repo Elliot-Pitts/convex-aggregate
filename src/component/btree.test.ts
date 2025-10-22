@@ -794,4 +794,188 @@ describe("btree matches simpler impl", () => {
       });
     }
   );
+
+  test("multi-sums with Record", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await getOrCreateTree(ctx.db, undefined, 4, false);
+
+      // Insert items with multi-sum values
+      await insertHandler(ctx, {
+        key: 1,
+        value: "a",
+        summand: { citations: 5, mentions: 3 },
+      });
+      await validateTree(ctx, {});
+
+      await insertHandler(ctx, {
+        key: 2,
+        value: "b",
+        summand: { citations: 10, mentions: 7 },
+      });
+      await validateTree(ctx, {});
+
+      await insertHandler(ctx, {
+        key: 3,
+        value: "c",
+        summand: { citations: 2, mentions: 1 },
+      });
+      await validateTree(ctx, {});
+
+      // Query the aggregated sum
+      const result = await aggregateBetweenHandler(ctx, {});
+      expect(result.sum).toEqual({ citations: 17, mentions: 11 });
+      expect(result.count).toBe(3);
+
+      // Query a partial range (bounds are exclusive, so 0 < key < 3 includes keys 1 and 2)
+      const partialResult = await aggregateBetweenHandler(ctx, {
+        k1: 0,
+        k2: 3,
+      });
+      expect(partialResult.sum).toEqual({ citations: 15, mentions: 10 });
+      expect(partialResult.count).toBe(2);
+
+      // Delete an item and verify
+      await deleteHandler(ctx, { key: 2 });
+      await validateTree(ctx, {});
+
+      const afterDelete = await aggregateBetweenHandler(ctx, {});
+      expect(afterDelete.sum).toEqual({ citations: 7, mentions: 4 });
+      expect(afterDelete.count).toBe(2);
+    });
+  });
+
+  test("backwards compatibility with single sumValue", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await getOrCreateTree(ctx.db, undefined, 4, false);
+
+      // Insert items with single number summands (old way)
+      await insertHandler(ctx, { key: 1, value: "a", summand: 10 });
+      await validateTree(ctx, {});
+
+      await insertHandler(ctx, { key: 2, value: "b", summand: 20 });
+      await validateTree(ctx, {});
+
+      await insertHandler(ctx, { key: 3, value: "c", summand: 30 });
+      await validateTree(ctx, {});
+
+      // Query should return a plain number, not a Record
+      const result = await aggregateBetweenHandler(ctx, {});
+      expect(result.sum).toBe(60);
+      expect(typeof result.sum).toBe("number");
+      expect(result.count).toBe(3);
+
+      // Delete and verify
+      await deleteHandler(ctx, { key: 2 });
+      await validateTree(ctx, {});
+
+      const afterDelete = await aggregateBetweenHandler(ctx, {});
+      expect(afterDelete.sum).toBe(40);
+      expect(typeof afterDelete.sum).toBe("number");
+    });
+  });
+
+  test("identity optimization prevents default field pollution", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await getOrCreateTree(ctx.db, undefined, 4, false);
+
+      // Insert a single item with multi-sum
+      await insertHandler(ctx, {
+        key: 1,
+        value: "a",
+        summand: { citations: 5 },
+      });
+      await validateTree(ctx, {});
+
+      // Result should be {citations: 5}, NOT {default: 0, citations: 5}
+      const result = await aggregateBetweenHandler(ctx, {});
+      expect(result.sum).toEqual({ citations: 5 });
+      expect(result.sum).not.toHaveProperty("default");
+    });
+  });
+
+  test("sumBatch with multi-sum aggregates", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await getOrCreateTree(ctx.db, undefined, 4, false);
+
+      // Insert items with multi-sum values
+      await insertHandler(ctx, {
+        key: 1,
+        value: "a",
+        summand: { citations: 5, mentions: 3 },
+      });
+      await insertHandler(ctx, {
+        key: 2,
+        value: "b",
+        summand: { citations: 10, mentions: 7 },
+      });
+      await insertHandler(ctx, {
+        key: 3,
+        value: "c",
+        summand: { citations: 2, mentions: 1 },
+      });
+      await validateTree(ctx, {});
+
+      // Query multiple ranges with batch (bounds are exclusive)
+      const batchResults = await aggregateBetweenBatchHandler(ctx, {
+        queries: [
+          {
+            k1: 0,  // 0 < key < 2 includes only key 1
+            k2: 2,
+          },
+          {
+            k1: 0,  // 0 < key < 3 includes keys 1 and 2
+            k2: 3,
+          },
+          {}, // All items
+        ],
+      });
+
+      expect(batchResults).toHaveLength(3);
+      expect(batchResults[0].sum).toEqual({ citations: 5, mentions: 3 });
+      expect(batchResults[1].sum).toEqual({ citations: 15, mentions: 10 });
+      expect(batchResults[2].sum).toEqual({ citations: 17, mentions: 11 });
+    });
+  });
+
+  test("sumBatch with old single-sum aggregates", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) => {
+      await getOrCreateTree(ctx.db, undefined, 4, false);
+
+      // Insert items with single number summands (old way)
+      await insertHandler(ctx, { key: 1, value: "a", summand: 10 });
+      await insertHandler(ctx, { key: 2, value: "b", summand: 20 });
+      await insertHandler(ctx, { key: 3, value: "c", summand: 30 });
+      await validateTree(ctx, {});
+
+      // Query multiple ranges with batch (bounds are exclusive)
+      const batchResults = await aggregateBetweenBatchHandler(ctx, {
+        queries: [
+          {
+            k1: 0,  // 0 < key < 2 includes only key 1
+            k2: 2,
+          },
+          {
+            k1: 0,  // 0 < key < 3 includes keys 1 and 2
+            k2: 3,
+          },
+          {}, // All items
+        ],
+      });
+
+      expect(batchResults).toHaveLength(3);
+      expect(batchResults[0].sum).toBe(10);
+      expect(batchResults[1].sum).toBe(30);
+      expect(batchResults[2].sum).toBe(60);
+
+      // All results should be plain numbers
+      batchResults.forEach((result) => {
+        expect(typeof result.sum).toBe("number");
+      });
+    });
+  });
 });

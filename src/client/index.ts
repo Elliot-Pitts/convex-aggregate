@@ -35,6 +35,7 @@ export type Item<K extends Key, ID extends string> = {
   key: K;
   id: ID;
   sumValue: number;
+  sumValues?: Record<string, number>;
 };
 
 export type { Key, Bound };
@@ -108,7 +109,7 @@ export class Aggregate<
   async sum(
     ctx: RunQueryCtx,
     ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
-  ): Promise<number> {
+  ): Promise<number | Record<string, number>> {
     const { sum } = await ctx.runQuery(this.component.btree.aggregateBetween, {
       ...boundsToPositions(opts[0]?.bounds),
       namespace: namespaceFromOpts(opts),
@@ -122,7 +123,7 @@ export class Aggregate<
   async sumBatch(
     ctx: RunQueryCtx,
     queries: NamespacedOptsBatch<{ bounds?: Bounds<K, ID> }, Namespace>
-  ): Promise<number[]> {
+  ): Promise<Array<number | Record<string, number>>> {
     const queryArgs = queries.map((query) => {
       if (!query) {
         throw new Error("You must pass bounds and/or namespace");
@@ -137,7 +138,7 @@ export class Aggregate<
         queries: queryArgs,
       }
     );
-    return results.map((result: { sum: number }) => result.sum);
+    return results.map((result: { sum: number | Record<string, number> }) => result.sum);
   }
 
   /**
@@ -374,7 +375,7 @@ export class Aggregate<
     namespace: Namespace,
     key: K,
     id: ID,
-    summand?: number
+    summand?: number | Record<string, number>
   ): Promise<void> {
     await ctx.runMutation(this.component.public.insert, {
       key: keyToPosition(key, id),
@@ -401,7 +402,7 @@ export class Aggregate<
     newNamespace: Namespace,
     newKey: K,
     id: ID,
-    summand?: number
+    summand?: number | Record<string, number>
   ): Promise<void> {
     await ctx.runMutation(this.component.public.replace, {
       currentKey: keyToPosition(currentKey, id),
@@ -417,7 +418,7 @@ export class Aggregate<
     namespace: Namespace,
     key: K,
     id: ID,
-    summand?: number
+    summand?: number | Record<string, number>
   ): Promise<void> {
     await this._replaceOrInsert(
       ctx,
@@ -447,7 +448,7 @@ export class Aggregate<
     newNamespace: Namespace,
     newKey: K,
     id: ID,
-    summand?: number
+    summand?: number | Record<string, number>
   ): Promise<void> {
     await ctx.runMutation(this.component.public.replaceOrInsert, {
       currentKey: keyToPosition(currentKey, id),
@@ -598,16 +599,24 @@ export class DirectAggregate<
   async insert(
     ctx: RunMutationCtx,
     args: NamespacedArgs<
-      { key: T["Key"]; id: T["Id"]; sumValue?: number },
+      { key: T["Key"]; id: T["Id"]; sumValue?: number; sumValues?: Record<string, number> },
       DirectAggregateNamespace<T>
     >
   ): Promise<void> {
+    // Validation: can't provide both
+    if (args.sumValue !== undefined && args.sumValues !== undefined) {
+      throw new Error("Cannot provide both sumValue and sumValues");
+    }
+
+    // Determine what to pass as summand
+    const summand = args.sumValues !== undefined ? args.sumValues : args.sumValue;
+
     await this._insert(
       ctx,
       namespaceFromArg(args),
       args.key,
       args.id,
-      args.sumValue
+      summand
     );
   }
   /**
@@ -635,10 +644,17 @@ export class DirectAggregate<
       DirectAggregateNamespace<T>
     >,
     newItem: NamespacedArgs<
-      { key: T["Key"]; sumValue?: number },
+      { key: T["Key"]; sumValue?: number; sumValues?: Record<string, number> },
       DirectAggregateNamespace<T>
     >
   ): Promise<void> {
+    // Validation: can't provide both
+    if (newItem.sumValue !== undefined && newItem.sumValues !== undefined) {
+      throw new Error("Cannot provide both sumValue and sumValues");
+    }
+
+    const summand = newItem.sumValues !== undefined ? newItem.sumValues : newItem.sumValue;
+
     await this._replace(
       ctx,
       namespaceFromArg(currentItem),
@@ -646,7 +662,7 @@ export class DirectAggregate<
       namespaceFromArg(newItem),
       newItem.key,
       currentItem.id,
-      newItem.sumValue
+      summand
     );
   }
   /**
@@ -660,16 +676,23 @@ export class DirectAggregate<
   async insertIfDoesNotExist(
     ctx: RunMutationCtx,
     args: NamespacedArgs<
-      { key: T["Key"]; id: T["Id"]; sumValue?: number },
+      { key: T["Key"]; id: T["Id"]; sumValue?: number; sumValues?: Record<string, number> },
       DirectAggregateNamespace<T>
     >
   ): Promise<void> {
+    // Validation: can't provide both
+    if (args.sumValue !== undefined && args.sumValues !== undefined) {
+      throw new Error("Cannot provide both sumValue and sumValues");
+    }
+
+    const summand = args.sumValues !== undefined ? args.sumValues : args.sumValue;
+
     await this._insertIfDoesNotExist(
       ctx,
       namespaceFromArg(args),
       args.key,
       args.id,
-      args.sumValue
+      summand
     );
   }
   async deleteIfExists(
@@ -688,10 +711,17 @@ export class DirectAggregate<
       DirectAggregateNamespace<T>
     >,
     newItem: NamespacedArgs<
-      { key: T["Key"]; sumValue?: number },
+      { key: T["Key"]; sumValue?: number; sumValues?: Record<string, number> },
       DirectAggregateNamespace<T>
     >
   ): Promise<void> {
+    // Validation: can't provide both
+    if (newItem.sumValue !== undefined && newItem.sumValues !== undefined) {
+      throw new Error("Cannot provide both sumValue and sumValues");
+    }
+
+    const summand = newItem.sumValues !== undefined ? newItem.sumValues : newItem.sumValue;
+
     await this._replaceOrInsert(
       ctx,
       namespaceFromArg(currentItem),
@@ -699,7 +729,7 @@ export class DirectAggregate<
       namespaceFromArg(newItem),
       newItem.key,
       currentItem.id,
-      newItem.sumValue
+      summand
     );
   }
 }
@@ -744,10 +774,13 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
 > {
   constructor(
     component: UsedAPI,
-    private options: {
+    private options: ({
       sortKey: (d: TableAggregateDocument<T>) => T["Key"];
-      sumValue?: (d: TableAggregateDocument<T>) => number;
-    } & (undefined extends TableAggregateNamespace<T>
+    } & (
+      | { sumValue: (d: TableAggregateDocument<T>) => number; sumValues?: never }
+      | { sumValues: (d: TableAggregateDocument<T>) => Record<string, number>; sumValue?: never }
+      | { sumValue?: never; sumValues?: never }
+    )) & (undefined extends TableAggregateNamespace<T>
       ? {
           namespace?: (
             d: TableAggregateDocument<T>
@@ -766,12 +799,15 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
     ctx: RunMutationCtx,
     doc: TableAggregateDocument<T>
   ): Promise<void> {
+    // Determine what to pass as summand
+    const summand = this.options.sumValues?.(doc) ?? this.options.sumValue?.(doc);
+
     await this._insert(
       ctx,
       this.options.namespace?.(doc),
       this.options.sortKey(doc),
       doc._id as TableAggregateId<T>,
-      this.options.sumValue?.(doc)
+      summand
     );
   }
   async delete(
@@ -790,6 +826,7 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
     oldDoc: TableAggregateDocument<T>,
     newDoc: TableAggregateDocument<T>
   ): Promise<void> {
+    const summand = this.options.sumValues?.(newDoc) ?? this.options.sumValue?.(newDoc);
     await this._replace(
       ctx,
       this.options.namespace?.(oldDoc),
@@ -797,19 +834,20 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
       this.options.namespace?.(newDoc),
       this.options.sortKey(newDoc),
       newDoc._id as TableAggregateId<T>,
-      this.options.sumValue?.(newDoc)
+      summand
     );
   }
   async insertIfDoesNotExist(
     ctx: RunMutationCtx,
     doc: TableAggregateDocument<T>
   ): Promise<void> {
+    const summand = this.options.sumValues?.(doc) ?? this.options.sumValue?.(doc);
     await this._insertIfDoesNotExist(
       ctx,
       this.options.namespace?.(doc),
       this.options.sortKey(doc),
       doc._id as TableAggregateId<T>,
-      this.options.sumValue?.(doc)
+      summand
     );
   }
   async deleteIfExists(
@@ -828,6 +866,7 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
     oldDoc: TableAggregateDocument<T>,
     newDoc: TableAggregateDocument<T>
   ): Promise<void> {
+    const summand = this.options.sumValues?.(newDoc) ?? this.options.sumValue?.(newDoc);
     await this._replaceOrInsert(
       ctx,
       this.options.namespace?.(oldDoc),
@@ -835,7 +874,7 @@ export class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
       this.options.namespace?.(newDoc),
       this.options.sortKey(newDoc),
       newDoc._id as TableAggregateId<T>,
-      this.options.sumValue?.(newDoc)
+      summand
     );
   }
   /**
@@ -924,14 +963,23 @@ export function btreeItemToAggregateItem<K extends Key, ID extends string>({
   s,
 }: {
   k: unknown;
-  s: number;
+  s: number | Record<string, number>;
 }): Item<K, ID> {
   const { key, id } = positionToKey(k as Position);
-  return {
-    key: key as K,
-    id: id as ID,
-    sumValue: s,
-  };
+  if (typeof s === "number") {
+    return {
+      key: key as K,
+      id: id as ID,
+      sumValue: s,
+    };
+  } else {
+    return {
+      key: key as K,
+      id: id as ID,
+      sumValue: 0,
+      sumValues: s,
+    };
+  }
 }
 
 export type NamespacedArgs<Args, Namespace> =

@@ -7,24 +7,24 @@ const item = v.object({
   // value, usually an id.
   v: v.any(),
   // summand, to be aggregated by summing.
-  s: v.number(),
+  s: v.union(v.number(), v.record(v.string(), v.number())),
 });
 
 export type Item = {
   k: ConvexValue;
   v: ConvexValue;
-  s: number;
+  s: number | Record<string, number>;
 };
 
 export const itemValidator = v.object({
   k: v.any(),
   v: v.any(),
-  s: v.number(),
+  s: v.union(v.number(), v.record(v.string(), v.number())),
 });
 
 export const aggregate = v.object({
   count: v.number(),
-  sum: v.number(),
+  sum: v.union(v.number(), v.record(v.string(), v.number())),
 });
 
 export type Aggregate = Infer<typeof aggregate>;
@@ -35,6 +35,7 @@ export default defineSchema({
     root: v.id("btreeNode"),
     namespace: v.optional(v.any()),
     maxNodeSize: v.number(),
+    sumType: v.optional(v.union(v.literal("single"), v.literal("multi"))),
   }).index("by_namespace", ["namespace"]),
   btreeNode: defineTable({
     items: v.array(item),
